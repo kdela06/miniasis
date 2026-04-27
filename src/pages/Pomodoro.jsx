@@ -2,32 +2,34 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useGlobalState } from '../store/GlobalContext';
 import { ModalCrearEvento, theme, inputNeoStyle, modalBoxStyle, Overlay } from './Calendario';
-import { Play, Pause, SkipForward, Settings, Check, ArrowLeft, ListTodo, ChevronLeft, Bell, BellOff, Plus, Maximize2, Minimize2 } from 'lucide-react'; // Añadidos iconos Maximize/Minimize
+import { Play, Pause, SkipForward, Settings, Check, ArrowLeft, ListTodo, ChevronLeft, Bell, BellOff, Plus, Maximize2, Minimize2, Trash2 } from 'lucide-react'; 
 import { useNavigate } from 'react-router-dom';
 
-// REDUCIDO: Bordes más finos (2px en lugar de 3px/4px) y sombras más suaves
+// HELPER: Obtener fecha actual en formato YYYY-MM-DD
+const getFechaString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
 const btnStyle = { padding: '10px 16px', borderRadius: '16px', border: `2px solid ${theme.border}`, backgroundColor: theme.cardWhite, color: theme.textDark, fontWeight: '800', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', boxShadow: `0 2px 0 ${theme.border}`, transition: 'transform 0.1s' };
 
 export default function Pomodoro() {
   const navigate = useNavigate();
-  const { tareas, examenes, entregas, updateTarea, updateExamen, updateEntrega, pomodoro, setPomodoro, planiConfig, setPlaniConfig, planiTareas, setPlaniTareas } = useGlobalState();
+  // CAMBIO: Importamos planificacion y setPlanificacion
+  const { tareas, examenes, entregas, updateTarea, updateExamen, updateEntrega, pomodoro, setPomodoro, planiConfig, setPlaniConfig, planiTareas, setPlaniTareas, planificacion, setPlanificacion } = useGlobalState();
   
-  const [tab, setTab] = useState('pomodoro'); // 'pomodoro' | 'planificador'
+  const [tab, setTab] = useState('pomodoro'); 
   const [showSettings, setShowSettings] = useState(false);
   const [showSelector, setShowSelector] = useState(false);
   const [showCompletion, setShowCompletion] = useState(null);
   const [modalCrearAbierto, setModalCrearAbierto] = useState(false);
-  const [isFullScreen, setIsFullScreen] = useState(false); // NUEVO ESTADO PARA PANTALLA COMPLETA
+  const [isFullScreen, setIsFullScreen] = useState(false);
 
-  // 1. LA IP SIEMPRE FUERA Y ARRIBA DEL TODO (justo debajo de los useState)
   const ESP32_IP = localStorage.getItem('esp32_ip') || "192.168.0.44";
   const [syncTick, setSyncTick] = useState(0);
+  
   useEffect(() => {
     const interval = setInterval(() => setSyncTick(t => t + 1), 1000);
     return () => clearInterval(interval);
   }, []);
 
-  // 2. COMUNICACIÓN TOTAL CON EL ESP32
   useEffect(() => {
     const minutos = Math.floor(pomodoro.timeLeft / 60).toString().padStart(2, '0');
     const segundos = (pomodoro.timeLeft % 60).toString().padStart(2, '0');
@@ -58,7 +60,6 @@ export default function Pomodoro() {
     })
     .then(res => res.json())
     .then(data => {
-      // AQUÍ ESTÁ LA LECTURA DE LOS BOTONES DE LA PLACA
       if (data.command === "TOGGLE") {
           toggleTimer();
       } 
@@ -74,24 +75,13 @@ export default function Pomodoro() {
       }
     })
     .catch(() => {}); 
-  }, [pomodoro.timeLeft, pomodoro.isActive, pomodoro.mode, tareas, examenes, entregas, planiTareas, syncTick]); // <-- syncTick ES LA MAGIA AQUÍ
+  }, [pomodoro.timeLeft, pomodoro.isActive, pomodoro.mode, tareas, examenes, entregas, planiTareas, syncTick]); 
   
-  
-
-
-  // 3. CAMBIO DE PANTALLA (Se ejecuta solo al entrar y salir del Pomodoro)
   useEffect(() => {
-    // Al entrar a la página: Forzar vista Pomodoro
     fetch(`http://${ESP32_IP}/setScreen?screen=POMODORO`).catch(() => {});
-    
-    // Al salir de la página (return): Volver al Menú
-    return () => {
-      fetch(`http://${ESP32_IP}/setScreen?screen=MENU`).catch(() => {});
-    };
+    return () => { fetch(`http://${ESP32_IP}/setScreen?screen=MENU`).catch(() => {}); };
   }, []);
 
-
-  // 4. PERMISOS DE NOTIFICACIONES (Se ejecuta al arrancar)
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
   }, []);
@@ -118,11 +108,26 @@ export default function Pomodoro() {
         updateEntrega(en.id, { apartados: newAps });
         newHrsLeft = parseFloat(newAps.find(x => x.id === taskRef.subId).horas);
       }
+    } else if (taskRef.type === 'plan') {
+      // CAMBIO: Si viene del calendario, al terminarlo lo quitamos del bloque
+      const tDate = getFechaString(new Date());
+      setPlanificacion(prev => {
+         const planDia = prev[tDate];
+         if(!planDia) return prev;
+         const bqKey = taskRef.bq;
+         return {
+            ...prev,
+            [tDate]: {
+               ...planDia,
+               [bqKey]: planDia[bqKey].filter(b => b.id !== taskRef.id)
+            }
+         };
+      });
+      newHrsLeft = 0;
     }
     return newHrsLeft;
   };
 
-  // --- LOGICA DE FINALIZACIÓN POMODORO ---
   useEffect(() => {
     if (pomodoro.needsCompletionHandle) {
       let hoursLeft = 1;
@@ -142,187 +147,111 @@ export default function Pomodoro() {
       if (pomodoro.mode === 'focus' && pomodoro.activeTask && hoursLeft <= 0) {
         setPomodoro(prev => ({...prev, isActive: false, endsAt: null}));
         setShowCompletion(pomodoro.activeTask);
-        setIsFullScreen(false); // Salir de pantalla completa si termina
+        setIsFullScreen(false); 
       }
     }
   }, [pomodoro.needsCompletionHandle]);
 
+  // --- RECOPILAR TRABAJO PARA HOY ---
+  const todayWork = useMemo(() => {
+    const work = [];
+    const tDate = getFechaString(new Date());
+
+    // 1. Tareas con fecha de hoy
+    tareas.filter(t => t.fecha === tDate && !t.completada).forEach(t => {
+      work.push({ type: 'tarea', id: t.id, title: t.titulo, hours: parseFloat(t.horasEstimadas || 0.5), color: t.color || theme.cardYellow });
+    });
+
+    // 2. Planificación del calendario para hoy (mañana, tarde, noche)
+    const planHoy = planificacion[tDate];
+    if (planHoy) {
+      ['m', 't', 'n'].forEach(bk => {
+        (planHoy[bk] || []).forEach(b => {
+          work.push({ type: 'plan', id: b.id, title: `[${bk.toUpperCase()}] ${b.title}`, hours: parseFloat(b.horas || 1), color: b.color || theme.cardBlue, bq: bk });
+        });
+      });
+    }
+    return work;
+  }, [tareas, planificacion]);
+
+
   // --- RECOPILAR TODO EL BACKLOG ---
   const pendingWork = useMemo(() => {
     const work = [];
-
-    // 1. Tareas normales
     tareas.filter(t => !t.completada).forEach(t => {
-      work.push({ 
-        type: 'tarea', 
-        id: t.id, 
-        title: t.titulo, 
-        hours: parseFloat(t.horasEstimadas || 0), 
-        color: t.color || theme.cardYellow 
-      });
+      work.push({ type: 'tarea', id: t.id, title: t.titulo, hours: parseFloat(t.horasEstimadas || 0), color: t.color || theme.cardYellow });
     });
-
-    // 2. Exámenes (Temas y Ejercicios)
     examenes.forEach(ex => ex.temas?.forEach(tema => {
       if (!tema.completado) {
         let hrs = tema.dificultad === 'custom' ? parseFloat(tema.horasCustom || 0) : parseFloat(tema.dificultad || 1);
-        if (hrs > 0) {
-          work.push({ 
-            type: 'examen', 
-            id: ex.id, 
-            subId: tema.id, 
-            title: `${ex.titulo}: ${tema.nombre}`, 
-            hours: hrs, 
-            color: ex.color || theme.cardCoral 
-          });
-        }
+        if (hrs > 0) work.push({ type: 'examen', id: ex.id, subId: tema.id, title: `${ex.titulo}: ${tema.nombre}`, hours: hrs, color: ex.color || theme.cardCoral });
       }
       if (tema.conEjercicios && !tema.ejerciciosCompletados) {
-        work.push({ 
-          type: 'examen', 
-          id: ex.id, 
-          subId: tema.id, 
-          isEjercicios: true,
-          title: `Ejercicios: ${tema.nombre} (${ex.titulo})`, 
-          hours: parseFloat(tema.horasEjercicios || 0), // ¡Número 0!
-          color: '#FAD4C0' 
-        });
+        work.push({ type: 'examen', id: ex.id, subId: tema.id, isEjercicios: true, title: `Ejercicios: ${tema.nombre} (${ex.titulo})`, hours: parseFloat(tema.horasEjercicios || 0), color: '#FAD4C0' });
       }
     }));
-
-    // 3. Entregas (Apartados)
     entregas.forEach(en => en.apartados?.forEach(ap => {
-      if (!ap.completado && parseFloat(ap.horas || 0) > 0) { // ¡Número 0!
-        work.push({ 
-          type: 'entrega', 
-          id: en.id, 
-          subId: ap.id, 
-          title: `${en.titulo}: ${ap.nombre}`, 
-          hours: parseFloat(ap.horas || 0), // ¡Número 0!
-          color: en.color || theme.cardBlue 
-        });
+      if (!ap.completado && parseFloat(ap.horas || 0) > 0) {
+        work.push({ type: 'entrega', id: en.id, subId: ap.id, title: `${en.titulo}: ${ap.nombre}`, hours: parseFloat(ap.horas || 0), color: en.color || theme.cardBlue });
       }
     }));
-
     return work;
   }, [tareas, examenes, entregas]);
 
-  // --- CONTROLES POMODORO ---
   const formatTime = (seconds) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
   const getModeColor = () => pomodoro.mode === 'focus' ? theme.cardCoral : pomodoro.mode === 'shortBreak' ? theme.cardBlue : theme.cardYellow;
   const toggleTimer = () => setPomodoro(prev => prev.isActive ? { ...prev, isActive: false, endsAt: null } : { ...prev, isActive: true, endsAt: Date.now() + prev.timeLeft * 1000 });
   const skipSession = () => setPomodoro(prev => ({ ...prev, isActive: false, endsAt: null, needsCompletionHandle: true }));
 
-  // ================= VISTA PANTALLA COMPLETA =================
   if (isFullScreen) {
     return (
       <div style={{
         position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-        backgroundColor: getModeColor(), // Fondo del color del modo actual
+        backgroundColor: getModeColor(), 
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         zIndex: 9999, color: '#FFF', fontFamily: theme.font
       }}>
-        
-        {/* Botón para salir */}
-        <button onClick={() => setIsFullScreen(false)} style={{
-          position: 'absolute', top: '30px', left: '20px',
-          background: 'none', border: 'none', color: '#FFF', cursor: 'pointer',
-          padding: '10px'
-        }}>
-          <Minimize2 size={32} />
-        </button>
-
-        {/* Info Tarea (opcional, muy sutil) */}
-        {pomodoro.activeTask && (
-          <div style={{ position: 'absolute', top: '40px', fontWeight: 700, opacity: 0.8, fontSize: '1.2rem', textAlign: 'center', padding: '0 20px' }}>
-            {pomodoro.activeTask.title}
-          </div>
-        )}
-
-        {/* Temporizador Gigante y limpio (ARREGLADO) */}
-        <div style={{ 
-          fontSize: '8rem', 
-          fontWeight: 900, 
-          letterSpacing: '-4px', 
-          textShadow: '0 4px 10px rgba(0,0,0,0.1)',
-          lineHeight: '1', // Evita que se monte el texto
-          margin: '20px 0'   // Le da espacio arriba y abajo
-        }}>
-          {formatTime(pomodoro.timeLeft)}
-        </div>
-
-        <div style={{ fontWeight: 800, fontSize: '1.2rem', opacity: 0.9 }}>
-          {pomodoro.mode === 'focus' ? `Ciclo ${pomodoro.cyclesCompleted % pomodoro.settings.cycles + 1} de ${pomodoro.settings.cycles}` : pomodoro.mode === 'shortBreak' ? '' : 'Descanso Largo'}
-        </div>
-
-        {/* Controles limpios */}
+        <button onClick={() => setIsFullScreen(false)} style={{ position: 'absolute', top: '30px', left: '20px', background: 'none', border: 'none', color: '#FFF', cursor: 'pointer', padding: '10px' }}><Minimize2 size={32} /></button>
+        {pomodoro.activeTask && (<div style={{ position: 'absolute', top: '40px', fontWeight: 700, opacity: 0.8, fontSize: '1.2rem', textAlign: 'center', padding: '0 20px' }}>{pomodoro.activeTask.title}</div>)}
+        <div style={{ fontSize: '8rem', fontWeight: 900, letterSpacing: '-4px', textShadow: '0 4px 10px rgba(0,0,0,0.1)', lineHeight: '1', margin: '20px 0' }}>{formatTime(pomodoro.timeLeft)}</div>
+        <div style={{ fontWeight: 800, fontSize: '1.2rem', opacity: 0.9 }}>{pomodoro.mode === 'focus' ? `Ciclo ${pomodoro.cyclesCompleted % pomodoro.settings.cycles + 1} de ${pomodoro.settings.cycles}` : pomodoro.mode === 'shortBreak' ? '' : 'Descanso Largo'}</div>
         <div style={{ display: 'flex', gap: '30px', marginTop: '50px' }}>
-          <button onClick={toggleTimer} style={{
-            width: '90px', height: '90px', borderRadius: '50%',
-            backgroundColor: 'rgba(255,255,255,0.2)', border: 'none',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-            backdropFilter: 'blur(5px)'
-          }}>
+          <button onClick={toggleTimer} style={{ width: '90px', height: '90px', borderRadius: '50%', backgroundColor: 'rgba(255,255,255,0.2)', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backdropFilter: 'blur(5px)' }}>
             {pomodoro.isActive ? <Pause size={45} color="#FFF" fill="#FFF" /> : <Play size={45} color="#FFF" fill="#FFF" style={{ marginLeft: '6px' }} />}
           </button>
-          
-          <button onClick={skipSession} style={{
-            width: '60px', height: '60px', borderRadius: '50%',
-            backgroundColor: 'transparent', border: '2px solid rgba(255,255,255,0.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
-            alignSelf: 'center'
-          }}>
-            <SkipForward size={28} color="#FFF" />
-          </button>
+          <button onClick={skipSession} style={{ width: '60px', height: '60px', borderRadius: '50%', backgroundColor: 'transparent', border: '2px solid rgba(255,255,255,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', alignSelf: 'center' }}><SkipForward size={28} color="#FFF" /></button>
         </div>
       </div>
     );
   }
 
-  // ================= RENDERIZADO NORMAL =================
   return (
     <div style={{ paddingTop: 'calc(24px + env(safe-area-inset-top))', paddingRight: '20px', paddingBottom: '24px', paddingLeft: '20px', minHeight: '100vh', backgroundColor: theme.bg, color: theme.textDark, fontFamily: theme.font, display: 'flex', flexDirection: 'column' }}>
       
-      {/* HEADER & TABS */}
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <button onClick={() => navigate('/')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.textDark }}><ArrowLeft size={28} /></button>
         <button onClick={() => setShowSettings(true)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: theme.textDark }}><Settings size={28} /></button>
       </header>
 
-      {/* REDUCIDO: Bordes más finos en el selector de tabs */}
       <div style={{ display: 'flex', gap: '10px', backgroundColor: theme.cardWhite, padding: '8px', borderRadius: '24px', border: `2px solid ${theme.border}`, marginBottom: '25px', boxShadow: `0 2px 0 ${theme.border}` }}>
          <button onClick={() => setTab('pomodoro')} style={{ flex: 1, padding: '10px', borderRadius: '16px', backgroundColor: tab === 'pomodoro' ? theme.cardCoral : 'transparent', color: tab === 'pomodoro' ? '#FFF' : theme.textMuted, border: 'none', fontWeight: 900, transition: 'all 0.2s', fontSize: '0.9rem' }}>Pomodoro</button>
          <button onClick={() => setTab('planificador')} style={{ flex: 1, padding: '10px', borderRadius: '16px', backgroundColor: tab === 'planificador' ? theme.cardBlue : 'transparent', color: tab === 'planificador' ? '#FFF' : theme.textMuted, border: 'none', fontWeight: 900, transition: 'all 0.2s', fontSize: '0.9rem' }}>Planificador</button>
       </div>
 
-      {/* --- VISTA 1: POMODORO CLÁSICO --- */}
       {tab === 'pomodoro' && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '30px', position: 'relative' }}>
-          
-          {/* Botón Maximizar */}
-          <button 
-            onClick={() => setIsFullScreen(true)}
-            style={{ position: 'absolute', top: 0, right: 0, background: 'none', border: 'none', color: theme.textMuted, cursor: 'pointer' }}
-            title="Pantalla Completa"
-          >
-            <Maximize2 size={24} />
-          </button>
+          <button onClick={() => setIsFullScreen(true)} style={{ position: 'absolute', top: 0, right: 0, background: 'none', border: 'none', color: theme.textMuted, cursor: 'pointer' }}><Maximize2 size={24} /></button>
 
-          {/* REDUCIDO: Bordes en los selectores de modo */}
           <div style={{ display: 'flex', gap: '8px', backgroundColor: theme.cardWhite, padding: '8px', borderRadius: '30px', border: `2px solid ${theme.border}`, boxShadow: `0 2px 0 ${theme.border}` }}>
             <button onClick={() => setPomodoro(p => ({...p, mode: 'focus', isActive: false, endsAt: null, timeLeft: p.settings.focus*60}))} style={{ ...btnStyle, flex: 1, padding: '8px 16px', fontSize: '0.8rem', borderRadius: '20px', backgroundColor: pomodoro.mode === 'focus' ? theme.cardCoral : 'transparent', border: 'none', boxShadow: 'none', color: pomodoro.mode === 'focus' ? '#FFF' : theme.textDark }}>Enfoque</button>
             <button onClick={() => setPomodoro(p => ({...p, mode: 'shortBreak', isActive: false, endsAt: null, timeLeft: p.settings.short*60}))} style={{ ...btnStyle, flex: 1, padding: '8px 16px', fontSize: '0.8rem', borderRadius: '20px', backgroundColor: pomodoro.mode === 'shortBreak' ? theme.cardBlue : 'transparent', border: 'none', boxShadow: 'none', color: pomodoro.mode === 'shortBreak' ? '#FFF' : theme.textDark }}>Corto</button>
             <button onClick={() => setPomodoro(p => ({...p, mode: 'longBreak', isActive: false, endsAt: null, timeLeft: p.settings.long*60}))} style={{ ...btnStyle, flex: 1, padding: '8px 16px', fontSize: '0.8rem', borderRadius: '20px', backgroundColor: pomodoro.mode === 'longBreak' ? theme.cardYellow : 'transparent', border: 'none', boxShadow: 'none', color: pomodoro.mode === 'longBreak' ? '#FFF' : theme.textDark }}>Largo</button>
           </div>
 
-          {/* CUADRADO REDONDEADO GIGANTE (SQUIRCLE) - REDUCIDO BORDES */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
             <div style={{ width: '260px', height: '260px', borderRadius: '48px', backgroundColor: getModeColor(), border: `4px solid ${theme.border}`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', boxShadow: `0 8px 0 ${theme.border}`, transition: 'all 0.3s ease', zIndex: 5 }}>
-              <span style={{ fontSize: '5.5rem', fontWeight: 900, color: '#FFF', letterSpacing: '-2px', textShadow: `0 3px 0 ${theme.border}` }}>
-                {formatTime(pomodoro.timeLeft)}
-              </span>
+              <span style={{ fontSize: '5.5rem', fontWeight: 900, color: '#FFF', letterSpacing: '-2px', textShadow: `0 3px 0 ${theme.border}` }}>{formatTime(pomodoro.timeLeft)}</span>
             </div>
-            {/* CAJA DE CICLOS SEPARADA - REDUCIDO BORDES */}
             <div style={{ backgroundColor: theme.cardWhite, border: `2px solid ${theme.border}`, padding: '8px 24px', borderRadius: '16px', fontWeight: 900, marginTop: '-20px', zIndex: 10, color: theme.textDark, boxShadow: `0 2px 0 ${theme.border}`, fontSize: '0.9rem' }}>
               {pomodoro.mode === 'focus' ? `Ciclo ${pomodoro.cyclesCompleted % pomodoro.settings.cycles + 1} de ${pomodoro.settings.cycles}` : pomodoro.mode === 'shortBreak' ? 'Descanso Corto' : 'Descanso Largo'}
             </div>
@@ -332,12 +261,9 @@ export default function Pomodoro() {
             <button onClick={toggleTimer} style={{ width: '80px', height: '80px', borderRadius: '50%', backgroundColor: pomodoro.isActive ? theme.cardYellow : theme.textDark, border: `3px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: `0 4px 0 ${theme.border}` }}>
               {pomodoro.isActive ? <Pause size={40} color={theme.textDark} fill={theme.textDark} /> : <Play size={40} color={theme.cardWhite} fill={theme.cardWhite} style={{ marginLeft: '6px' }} />}
             </button>
-            <button onClick={skipSession} style={{ width: '60px', height: '60px', borderRadius: '50%', backgroundColor: theme.cardWhite, border: `2px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: `0 2px 0 ${theme.border}`, alignSelf: 'center' }}>
-              <SkipForward size={24} color={theme.textDark} />
-            </button>
+            <button onClick={skipSession} style={{ width: '60px', height: '60px', borderRadius: '50%', backgroundColor: theme.cardWhite, border: `2px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: `0 2px 0 ${theme.border}`, alignSelf: 'center' }}><SkipForward size={24} color={theme.textDark} /></button>
           </div>
 
-          {/* Selector Tarea Inferior - REDUCIDO BORDES */}
           <div style={{ width: '100%', backgroundColor: theme.cardWhite, border: `2px solid ${theme.border}`, borderRadius: '24px', padding: '20px', boxShadow: `0 4px 0 ${theme.border}`, marginTop: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, cursor: 'pointer' }} onClick={() => setShowSelector(true)} >
@@ -356,10 +282,10 @@ export default function Pomodoro() {
 
       {/* --- VISTA 2: PLANIFICADOR MAGICO --- */}
       {tab === 'planificador' && (
-        <PlanificadorView pendingWork={pendingWork} planiConfig={planiConfig} setPlaniConfig={setPlaniConfig} planiTareas={planiTareas} setPlaniTareas={setPlaniTareas} deductTime={deductTime} />
+        <PlanificadorView pendingWork={pendingWork} todayWork={todayWork} planiConfig={planiConfig} setPlaniConfig={setPlaniConfig} planiTareas={planiTareas} setPlaniTareas={setPlaniTareas} deductTime={deductTime} />
       )}
 
-      {/* BOTÓN FLOTANTE PARA AÑADIR TAREAS GLOBALES */}
+      {/* BOTÓN FLOTANTE */}
       {!isFullScreen && (
         <button onClick={() => setModalCrearAbierto(true)} style={{ position: 'fixed', bottom: '30px', right: '20px', width: '60px', height: '60px', borderRadius: '20px', backgroundColor: theme.cardFrog, border: `2px solid ${theme.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 3px 0 ${theme.border}`, cursor: 'pointer', zIndex: 100 }}>
             <Plus size={35} strokeWidth={3} color={theme.textDark} />
@@ -369,7 +295,6 @@ export default function Pomodoro() {
       {/* MODALES */}
       {modalCrearAbierto && <ModalCrearEvento onClose={() => setModalCrearAbierto(false)} defaultTab="tarea" />}
       
-      {/* ... (Modal Settings y Modal Selector se mantienen igual, usando btnStyle actualizado) */}
       {showSettings && (
         <Overlay onClose={() => setShowSettings(false)}>
           <div style={modalBoxStyle} onMouseDown={e => e.stopPropagation()}>
@@ -412,8 +337,7 @@ export default function Pomodoro() {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <button onClick={() => {
-                if(showCompletion.type === 'tarea') updateTarea(showCompletion.id, { completada: true });
-                else deductTime(showCompletion, showCompletion.hours * 60); // Deja a 0
+                deductTime(showCompletion, showCompletion.hours * 60); 
                 if(pomodoro.activeTask?.id === showCompletion.id) setPomodoro(p => ({...p, activeTask: null}));
                 setShowCompletion(null);
               }} style={{ ...btnStyle, backgroundColor: theme.textDark, color: theme.cardWhite, padding: '15px' }}>Marcar como Completada</button>
@@ -432,22 +356,39 @@ export default function Pomodoro() {
 }
 
 // =======================================================
-// SUB-COMPONENTE: PLANIFICADOR (Adaptado a Globales)
+// SUB-COMPONENTE: PLANIFICADOR (Adaptado)
 // =======================================================
-function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTareas, setPlaniTareas, deductTime }) {
+function PlanificadorView({ pendingWork, todayWork, planiConfig, setPlaniConfig, planiTareas, setPlaniTareas, deductTime }) {
   const [horasInput, setHorasInput] = useState(planiConfig.horasConfirmadas?.toString() || '');
   const [prioridad, setPrioridad] = useState(2);
   const [selectedIdx, setSelectedIdx] = useState("");
 
   const distribuir = (lista, totalMinutos) => {
     if (!lista.length) return lista;
+    
+    // Separar las que el usuario ha fijado manualmente de las que no
+    const lockedTasks = lista.filter(t => t.manualLock);
+    const unlockedTasks = lista.filter(t => !t.manualLock);
+    
+    const lockedMinutes = lockedTasks.reduce((s, t) => s + t.minutos, 0);
+    const remainingMinutes = Math.max(0, totalMinutos - lockedMinutes);
+
     const pesos = { 1: 1, 2: 2, 3: 3.5 };
-    const pesoTotal = lista.reduce((s, t) => s + pesos[t.prioridad], 0);
+    const pesoTotal = unlockedTasks.reduce((s, t) => s + pesos[t.prioridad], 0);
+
     return lista.map(t => {
-      const base = (pesos[t.prioridad] / pesoTotal) * totalMinutos;
-      const variacion = base * (0.85 + Math.random() * 0.3);
-      const minutos = Math.max(5, Math.round(variacion));
-      return { ...t, minutos, segundosRestantes: minutos * 60, corriendo: false, endsAt: null, notificada: false };
+      if (t.manualLock) {
+        // Tarea manual: no se toca su tiempo (pero se resetean contadores por simplicidad visual al redistribuir)
+        return { ...t, segundosRestantes: t.minutos * 60, corriendo: false, endsAt: null, notificada: false };
+      }
+      
+      let minutos = 0;
+      if (pesoTotal > 0) {
+        const base = (pesos[t.prioridad] / pesoTotal) * remainingMinutes;
+        minutos = Math.round(base); 
+      }
+      
+      return { ...t, minutos, segundosRestantes: Math.max(0, minutos * 60), corriendo: false, endsAt: null, notificada: false };
     });
   };
 
@@ -461,8 +402,21 @@ function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTarea
 
   const añadirTarea = () => {
     if (selectedIdx === "" || !planiConfig.horasConfirmadas) return;
-    const work = pendingWork[selectedIdx];
-    const nueva = { id: Date.now(), nombre: work.title, globalRef: work, prioridad: parseInt(prioridad), color: work.color };
+    
+    // Identificamos de dónde viene ("today-0", "backlog-1", etc)
+    const [src, idxStr] = selectedIdx.split('-');
+    const idx = parseInt(idxStr);
+    const work = src === 'today' ? todayWork[idx] : pendingWork[idx];
+
+    const nueva = { 
+        id: Date.now(), 
+        nombre: work.title, 
+        globalRef: work, 
+        prioridad: parseInt(prioridad), 
+        color: work.color,
+        manualLock: false,
+        minutos: 0
+    };
     setPlaniTareas(distribuir([...planiTareas, nueva], Math.round(planiConfig.horasConfirmadas * 60)));
     setSelectedIdx("");
   };
@@ -470,19 +424,39 @@ function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTarea
   const togglePlaniTimer = (id) => {
     setPlaniTareas(prev => prev.map(t => {
       if (t.id === id) return t.corriendo ? { ...t, corriendo: false, endsAt: null } : { ...t, corriendo: true, endsAt: Date.now() + t.segundosRestantes * 1000, notificada: false };
-      return { ...t, corriendo: false, endsAt: null }; // Pausa los demás
+      return { ...t, corriendo: false, endsAt: null }; 
     }));
   };
 
   const marcarHecho = (t) => {
-    deductTime(t.globalRef, t.minutos); // Descuenta las horas asignadas del global
+    deductTime(t.globalRef, t.minutos); 
     setPlaniTareas(distribuir(planiTareas.filter(x => x.id !== t.id), Math.round(planiConfig.horasConfirmadas * 60)));
+  };
+
+  const eliminarTareaPlani = (id) => {
+    setPlaniTareas(prev => distribuir(prev.filter(x => x.id !== id), Math.round(planiConfig.horasConfirmadas * 60)));
+  };
+
+  const editarTiempo = (t) => {
+    const val = prompt(`Minutos para "${t.nombre}":\n(Deja vacío para que sea automático)`, t.minutos);
+    if (val === null) return; 
+    
+    if (val.trim() === "") {
+        setPlaniTareas(prev => {
+            const newList = prev.map(x => x.id === t.id ? { ...x, manualLock: false } : x);
+            return distribuir(newList, Math.round(planiConfig.horasConfirmadas * 60));
+        });
+    } else if (!isNaN(val) && Number(val) > 0) {
+        setPlaniTareas(prev => {
+            const newList = prev.map(x => x.id === t.id ? { ...x, minutos: Number(val), manualLock: true } : x);
+            return distribuir(newList, Math.round(planiConfig.horasConfirmadas * 60));
+        });
+    }
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       
-      {/* PANEL SUPERIOR: HORAS Y DONUT */}
       <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: '200px', backgroundColor: theme.cardWhite, padding: '20px', borderRadius: '24px', border: `2px solid ${theme.border}`, boxShadow: `0 3px 0 ${theme.border}`, display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -502,11 +476,15 @@ function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTarea
         )}
       </div>
 
-      {/* AÑADIR AL PLANIFICADOR DESDE EL BACKLOG */}
       <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
         <select value={selectedIdx} onChange={e => setSelectedIdx(e.target.value)} style={{...inputNeoStyle, flex: 2, minWidth: '150px'}} disabled={!planiConfig.horasConfirmadas}>
-          <option value="">Añadir del Backlog...</option>
-          {pendingWork.map((pw, i) => ( <option key={i} value={i}>{pw.title} ({pw.hours}h)</option> ))}
+          <option value="">Añadir tarea...</option>
+          <optgroup label="Actividades programadas para hoy">
+             {todayWork.map((pw, i) => ( <option key={`today-${i}`} value={`today-${i}`}>{pw.title} ({pw.hours}h)</option> ))}
+          </optgroup>
+          <optgroup label="Backlog general">
+             {pendingWork.map((pw, i) => ( <option key={`backlog-${i}`} value={`backlog-${i}`}>{pw.title} ({pw.hours}h)</option> ))}
+          </optgroup>
         </select>
         <select value={prioridad} onChange={e => setPrioridad(e.target.value)} style={{...inputNeoStyle, flex: 1, minWidth: '110px'}} disabled={!planiConfig.horasConfirmadas}>
           <option value={3}>3 - Alta</option><option value={2}>2 - Media</option><option value={1}>1 - Baja</option>
@@ -514,11 +492,11 @@ function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTarea
         <button onClick={añadirTarea} disabled={!planiConfig.horasConfirmadas || selectedIdx === ""} style={{ ...btnStyle, backgroundColor: theme.cardYellow }}>Añadir</button>
       </div>
 
-      {/* LISTA DE TAREAS CORRIENDO */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
         {planiTareas.map(t => (
-          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: t.corriendo ? '#f0fdf4' : theme.cardWhite, border: `2px solid ${theme.border}`, borderRadius: '16px', padding: '12px', boxShadow: `0 2px 0 ${theme.border}`, opacity: t.segundosRestantes === 0 ? 0.6 : 1 }}>
+          <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', backgroundColor: t.corriendo ? '#f0fdf4' : theme.cardWhite, border: `2px solid ${t.manualLock ? theme.cardCoral : theme.border}`, borderRadius: '16px', padding: '12px', boxShadow: `0 2px 0 ${t.manualLock ? theme.cardCoral : theme.border}`, opacity: t.segundosRestantes === 0 ? 0.6 : 1, transition: 'all 0.2s' }}>
             <div style={{ width: '12px', height: '12px', borderRadius: '50%', backgroundColor: t.color }} />
+            
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 800, fontSize: '0.9rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.nombre}</div>
               <div style={{ marginTop: '6px', height: '6px', borderRadius: '3px', background: theme.bg, border: `1px solid ${theme.border}` }}>
@@ -526,17 +504,28 @@ function PlanificadorView({ pendingWork, planiConfig, setPlaniConfig, planiTarea
               </div>
             </div>
             
-            <div style={{ fontWeight: 900, fontFamily: 'monospace', fontSize: '1rem', width: '55px', textAlign: 'right' }}>
-              {t.segundosRestantes === 0 ? 'Hecho' : `${Math.floor(t.segundosRestantes/60)}:${(t.segundosRestantes%60).toString().padStart(2,'0')}`}
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <div 
+                  onClick={() => editarTiempo(t)}
+                  title="Click para fijar/editar minutos manualmente"
+                  style={{ fontWeight: 900, fontFamily: 'monospace', fontSize: '1rem', width: '55px', textAlign: 'right', cursor: 'pointer', color: t.manualLock ? theme.cardCoral : theme.textDark, textDecoration: t.manualLock ? 'underline' : 'none', textDecorationStyle: 'dotted' }}
+                >
+                  {t.segundosRestantes === 0 ? 'Hecho' : `${Math.floor(t.segundosRestantes/60)}:${(t.segundosRestantes%60).toString().padStart(2,'0')}`}
+                </div>
+                
+                {t.segundosRestantes === 0 ? (
+                   <button onClick={() => marcarHecho(t)} style={{ ...btnStyle, padding: '8px', backgroundColor: theme.cardFrog }}><Check size={18}/></button>
+                ) : (
+                   <button onClick={() => togglePlaniTimer(t.id)} style={{ ...btnStyle, padding: '8px', backgroundColor: t.corriendo ? theme.cardYellow : theme.textDark }} >
+                     {t.corriendo ? <Pause size={18} color={theme.textDark}/> : <Play size={18} color="#FFF" fill="#FFF"/>}
+                   </button>
+                )}
+                
+                {/* BOTÓN ELIMINAR INDIVIDUAL */}
+                <button onClick={() => eliminarTareaPlani(t.id)} style={{ ...btnStyle, padding: '8px', backgroundColor: '#FFEBEE', color: '#D32F2F', borderColor: '#D32F2F', boxShadow: 'none' }}>
+                    <Trash2 size={18} />
+                </button>
             </div>
-            
-            {t.segundosRestantes === 0 ? (
-               <button onClick={() => marcarHecho(t)} style={{ ...btnStyle, padding: '8px', backgroundColor: theme.cardFrog }}><Check size={18}/></button>
-            ) : (
-               <button onClick={() => togglePlaniTimer(t.id)} style={{ ...btnStyle, padding: '8px', backgroundColor: t.corriendo ? theme.cardYellow : theme.textDark }} >
-                 {t.corriendo ? <Pause size={18}/> : <Play size={18} color="#FFF" fill="#FFF"/>}
-               </button>
-            )}
           </div>
         ))}
       </div>
