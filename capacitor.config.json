@@ -1,0 +1,8 @@
+{
+  "appId": "com.miniasis.app",
+  "appName": "miniasis",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true
+  }
+}
